@@ -357,15 +357,26 @@ function handleAdjustTap(x, y){
   }
 }
 
-overlay().addEventListener('click', (e) => {
+function handleTapEvent(clientX, clientY){
   if (!adjustMode) return;
   const canvas = overlay();
   const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width / rect.width;
   const scaleY = canvas.height / rect.height;
-  const x = (e.clientX - rect.left) * scaleX;
-  const y = (e.clientY - rect.top) * scaleY;
+  const x = (clientX - rect.left) * scaleX;
+  const y = (clientY - rect.top) * scaleY;
   handleAdjustTap(x, y);
+}
+
+overlay().addEventListener('touchstart', (e) => {
+  if (!adjustMode) return;
+  e.preventDefault();
+  const touch = e.touches[0];
+  handleTapEvent(touch.clientX, touch.clientY);
+}, { passive: false });
+
+overlay().addEventListener('click', (e) => {
+  handleTapEvent(e.clientX, e.clientY);
 });
 
 function onHandResults(results){
