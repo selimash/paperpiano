@@ -35,6 +35,12 @@ body { background:#ffffff; color:#1a1a1a; min-height:100vh; }
 #playInstructions { margin-top:16px; text-align:center; color:#333; font-size:1rem; }
 .back-link { margin-top:16px; background:none; border:none; color:#2563eb; font-size:0.95rem; cursor:pointer; text-decoration:underline; }
 
+.control-row { display:flex; gap:14px; margin-top:10px; flex-wrap:wrap; justify-content:center; }
+.calibrate-btn { background:#2563eb; color:white; border:none; padding:12px 26px; border-radius:14px;
+  font-size:1rem; font-weight:600; cursor:pointer; }
+.flip-btn { background:#111; color:white; border:none; padding:12px 26px; border-radius:14px;
+  font-size:1rem; font-weight:600; cursor:pointer; }
+
 footer.credit { position:fixed; bottom:10px; width:100%; text-align:center; font-size:0.8rem; color:#999; }
 </style>
 </head>
@@ -70,17 +76,27 @@ footer.credit { position:fixed; bottom:10px; width:100%; text-align:center; font
     <video id="video" autoplay playsinline muted></video>
     <canvas id="overlay"></canvas>
   </div>
-  <p id="playInstructions">Starting camera...</p>
-  <button class="back-link" onclick="toggleCamera()">Flip Camera</button>
+  <p id="playInstructions">Place your drawn piano flat in view of the camera, then tap calibrate.</p>
+  <div class="control-row">
+    <button class="calibrate-btn" onclick="calibrate()">Calibrate</button>
+    <button class="flip-btn" onclick="toggleCamera()">Flip Camera</button>
+  </div>
   <button class="back-link" onclick="stopCameraAndGoHome()">Back to Home</button>
 </div>
 
 <footer class="credit">Built by Selim Ashraf and Claude</footer>
 
 <script>
-let currentFacingMode = 'environment'; // 'environment' = back camera, 'user' = front/selfie camera
+let currentFacingMode = 'environment';
 let audioCtx = null;
 let currentStream = null;
+let handsDetector = null;
+let cameraFeed = null;
+let keyRegions = [];
+let calibrated = false;
+let lastPlayedKey = {};
+const video = () => document.getElementById('video');
+const overlay = () => document.getElementById('overlay');
 
 function showScreen(id){
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
@@ -111,6 +127,12 @@ const SONGS = {
   ode_to_joy: ['E4','E4','F4','G4','G4','F4','E4','D4','C4','C4','D4','E4','E4','D4','D4']
 };
 
+const NOTE_FREQS = {
+  'C4':261.63,'D4':293.66,'E4':329.63,'F4':349.23,'G4':392.00,'A4':440.00,'B4':493.88,
+  'C5':523.25,'D5':587.33,'E5':659.25,'F5':698.46,'G5':783.99,'A5':880.00,'B5':987.77
+};
+const KEY_NAMES = ['C4','D4','E4','F4','G4','A4','B4','C5'];
+
 function playNote(note){
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -118,15 +140,8 @@ function playNote(note){
   if (audioCtx.state === 'suspended') {
     audioCtx.resume();
   }
-
-  const noteFreqs = {
-    'C4':261.63,'D4':293.66,'E4':329.63,'F4':349.23,'G4':392.00,'A4':440.00,'B4':493.88,
-    'C5':523.25,'D5':587.33,'E5':659.25,'F5':698.46,'G5':783.99,'A5':880.00,'B5':987.77
-  };
-
-  const freq = noteFreqs[note];
+  const freq = NOTE_FREQS[note];
   if (!freq) return;
-
   const osc = audioCtx.createOscillator();
   const gain = audioCtx.createGain();
   osc.type = 'sine';
@@ -141,11 +156,11 @@ function playNote(note){
 
 function toggleCamera(){
   currentFacingMode = (currentFacingMode === 'environment') ? 'user' : 'environment';
+  calibrated = false;
   startCamera();
 }
 
 function startCamera(){
-  const video = document.getElementById('video');
   if (currentStream) {
     currentStream.getTracks().forEach(track => track.stop());
   }
@@ -153,11 +168,104 @@ function startCamera(){
     video: { facingMode: currentFacingMode }
   }).then(stream => {
     currentStream = stream;
-    video.srcObject = stream;
+    video().srcObject = stream;
     document.getElementById('playInstructions').innerText = 'Place your drawn piano flat in view of the camera, then tap calibrate.';
+    setupHandTracking();
   }).catch(err => {
     document.getElementById('playInstructions').innerText = 'Camera error: ' + err.message;
   });
+}
+
+function setupHandTracking(){
+  if (handsDetector) return;
+  handsDetector = new Hands({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+  });
+  handsDetector.setOptions({
+    maxNumHands: 2,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.6,
+    minTrackingConfidence: 0.6
+  });
+  handsDetector.onResults(onHandResults);
+
+  cameraFeed = new Camera(video(), {
+    onFrame: async () => {
+      await handsDetector.send({image: video()});
+    },
+    width: 640,
+    height: 480
+  });
+  cameraFeed.start();
+}
+
+function calibrate(){
+  const v = video();
+  const canvas = overlay();
+  canvas.width = v.videoWidth;
+  canvas.height = v.videoHeight;
+
+  const marginX = canvas.width * 0.05;
+  const keyboardTop = canvas.height * 0.55;
+  const keyboardBottom = canvas.height * 0.9;
+  const usableWidth = canvas.width - marginX * 2;
+  const keyWidth = usableWidth / KEY_NAMES.length;
+
+  keyRegions = KEY_NAMES.map((note, i) => ({
+    note,
+    x1: marginX + i * keyWidth,
+    x2: marginX + (i + 1) * keyWidth,
+    y1: keyboardTop,
+    y2: keyboardBottom
+  }));
+
+  calibrated = true;
+  document.getElementById('playInstructions').innerText = 'Calibrated! Tap the keys on your paper piano to play.';
+}
+
+function onHandResults(results){
+  const canvas = overlay();
+  const ctx = canvas.getContext('2d');
+  if (canvas.width !== video().videoWidth) {
+    canvas.width = video().videoWidth;
+    canvas.height = video().videoHeight;
+  }
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (calibrated) {
+    ctx.strokeStyle = 'rgba(37,99,235,0.6)';
+    ctx.lineWidth = 2;
+    keyRegions.forEach(k => {
+      ctx.strokeRect(k.x1, k.y1, k.x2 - k.x1, k.y2 - k.y1);
+    });
+  }
+
+  const pressedThisFrame = {};
+
+  if (results.multiHandLandmarks) {
+    for (const landmarks of results.multiHandLandmarks) {
+      const tip = landmarks[8]; // index fingertip
+      const x = tip.x * canvas.width;
+      const y = tip.y * canvas.height;
+
+      ctx.beginPath();
+      ctx.arc(x, y, 10, 0, 2 * Math.PI);
+      ctx.fillStyle = 'rgba(37,99,235,0.8)';
+      ctx.fill();
+
+      if (calibrated) {
+        const hitKey = keyRegions.find(k => x >= k.x1 && x <= k.x2 && y >= k.y1 && y <= k.y2);
+        if (hitKey) {
+          pressedThisFrame[hitKey.note] = true;
+          if (!lastPlayedKey[hitKey.note]) {
+            playNote(hitKey.note);
+          }
+        }
+      }
+    }
+  }
+
+  lastPlayedKey = pressedThisFrame;
 }
 
 function startPlay(songId){
@@ -170,6 +278,12 @@ function stopCameraAndGoHome(){
     currentStream.getTracks().forEach(track => track.stop());
     currentStream = null;
   }
+  if (cameraFeed) {
+    cameraFeed.stop();
+    cameraFeed = null;
+  }
+  handsDetector = null;
+  calibrated = false;
   showScreen('home');
 }
 </script>
