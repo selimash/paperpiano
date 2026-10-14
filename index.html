@@ -29,6 +29,10 @@ body { background:#ffffff; color:#1a1a1a; min-height:100vh; }
 .song-item { background:#f5f7fb; border-radius:14px; padding:16px 20px; margin:8px 0; width:100%; max-width:400px;
   cursor:pointer; font-size:1.05rem; font-weight:600; }
 
+#setup { max-width:500px; text-align:center; }
+#setup h1 { font-size:1.8rem; margin-bottom:16px; }
+#setup ol { text-align:left; margin:20px auto; max-width:420px; line-height:1.8; font-size:1.05rem; color:#333; }
+
 #play { position:relative; width:100%; max-width:700px; }
 #video, #overlay { position:absolute; top:0; left:0; width:100%; border-radius:12px; }
 .video-wrap { position:relative; width:100%; aspect-ratio:4/3; background:#000; border-radius:12px; overflow:hidden; }
@@ -36,10 +40,13 @@ body { background:#ffffff; color:#1a1a1a; min-height:100vh; }
 .back-link { margin-top:16px; background:none; border:none; color:#2563eb; font-size:0.95rem; cursor:pointer; text-decoration:underline; }
 
 .control-row { display:flex; gap:14px; margin-top:10px; flex-wrap:wrap; justify-content:center; }
-.calibrate-btn { background:#2563eb; color:white; border:none; padding:12px 26px; border-radius:14px;
-  font-size:1rem; font-weight:600; cursor:pointer; }
-.flip-btn { background:#111; color:white; border:none; padding:12px 26px; border-radius:14px;
-  font-size:1rem; font-weight:600; cursor:pointer; }
+.calibrate-btn { background:#2563eb; color:white; border:none; padding:12px 24px; border-radius:14px;
+  font-size:0.95rem; font-weight:600; cursor:pointer; }
+.flip-btn { background:#111; color:white; border:none; padding:12px 24px; border-radius:14px;
+  font-size:0.95rem; font-weight:600; cursor:pointer; }
+.adjust-btn { background:#059669; color:white; border:none; padding:12px 24px; border-radius:14px;
+  font-size:0.95rem; font-weight:600; cursor:pointer; }
+.adjust-btn.active-mode { background:#dc2626; }
 
 footer.credit { position:fixed; bottom:10px; width:100%; text-align:center; font-size:0.8rem; color:#999; }
 </style>
@@ -60,14 +67,26 @@ footer.credit { position:fixed; bottom:10px; width:100%; text-align:center; font
     <div class="stat-card"><div class="stat-num" id="minutesNum">0</div><div class="stat-label">Minutes played</div></div>
   </div>
   <button class="mode-btn" onclick="showScreen('learnList')">Learning Mode</button>
-  <button class="mode-btn secondary" onclick="startPlay(null)">Start Playing</button>
+  <button class="mode-btn secondary" onclick="showScreen('setup')">Start Playing</button>
 </div>
 
 <div id="learnList" class="screen">
   <h1>Choose a song</h1>
-  <div class="song-item" onclick="startPlay('runaway')">Runaway (Intro) - Kanye West</div>
-  <div class="song-item" onclick="startPlay('mary_lamb')">Mary Had a Little Lamb</div>
-  <div class="song-item" onclick="startPlay('ode_to_joy')">Ode to Joy - Beethoven</div>
+  <div class="song-item" onclick="pendingSong='runaway'; showScreen('setup')">Runaway (Intro) - Kanye West</div>
+  <div class="song-item" onclick="pendingSong='mary_lamb'; showScreen('setup')">Mary Had a Little Lamb</div>
+  <div class="song-item" onclick="pendingSong='ode_to_joy'; showScreen('setup')">Ode to Joy - Beethoven</div>
+  <button class="back-link" onclick="showScreen('home')">Back</button>
+</div>
+
+<div id="setup" class="screen">
+  <h1>Set up your camera</h1>
+  <ol>
+    <li>Draw your piano keyboard on a sheet of paper, flat on a desk.</li>
+    <li>Prop your phone up against a cup, book, or stand so the camera points down at the paper.</li>
+    <li>Make sure the whole keyboard is visible in frame, with good lighting.</li>
+    <li>Tap Start below, then use Calibrate or Adjust Keys to match the zones to your drawing.</li>
+  </ol>
+  <button class="cta-btn" onclick="startPlay()">Start</button>
   <button class="back-link" onclick="showScreen('home')">Back</button>
 </div>
 
@@ -80,6 +99,7 @@ footer.credit { position:fixed; bottom:10px; width:100%; text-align:center; font
   <div class="control-row">
     <button class="calibrate-btn" onclick="calibrate()">Calibrate</button>
     <button class="flip-btn" onclick="toggleCamera()">Flip Camera</button>
+    <button class="adjust-btn" id="adjustBtn" onclick="toggleAdjustMode()">Adjust Keys</button>
   </div>
   <button class="back-link" onclick="stopCameraAndGoHome()">Back to Home</button>
 </div>
@@ -92,9 +112,24 @@ let audioCtx = null;
 let currentStream = null;
 let handsDetector = null;
 let cameraFeed = null;
-let keyRegions = [];
+let whiteKeyRegions = [];
+let blackKeyRegions = [];
 let calibrated = false;
 let lastPlayedKey = {};
+let pendingSong = null;
+let smoothX = null, smoothY = null;
+const SMOOTHING = 0.35; // lower = smoother/slower, higher = snappier
+
+// Adjust mode state: user taps to mark left/right edge of each white key, then each black key
+let adjustMode = false;
+let adjustStep = 0; // index into adjustSequence
+let adjustTaps = []; // collected points for current key
+let adjustedWhite = [];
+let adjustedBlack = [];
+const WHITE_KEYS = ['C4','D4','E4','F4','G4','A4','B4','C5'];
+const BLACK_KEYS_AFTER = {'C4':'C#4','D4':'D#4','F4':'F#4','G4':'G#4','A4':'A#4'};
+const BLACK_KEY_NOTES = Object.values(BLACK_KEYS_AFTER);
+
 const video = () => document.getElementById('video');
 const overlay = () => document.getElementById('overlay');
 
@@ -128,10 +163,9 @@ const SONGS = {
 };
 
 const NOTE_FREQS = {
-  'C4':261.63,'D4':293.66,'E4':329.63,'F4':349.23,'G4':392.00,'A4':440.00,'B4':493.88,
-  'C5':523.25,'D5':587.33,'E5':659.25,'F5':698.46,'G5':783.99,'A5':880.00,'B5':987.77
+  'C4':261.63,'C#4':277.18,'D4':293.66,'D#4':311.13,'E4':329.63,'F4':349.23,'F#4':369.99,
+  'G4':392.00,'G#4':415.30,'A4':440.00,'A#4':466.16,'B4':493.88,'C5':523.25
 };
-const KEY_NAMES = ['C4','D4','E4','F4','G4','A4','B4','C5'];
 
 function playNote(note){
   if (!audioCtx) {
@@ -142,16 +176,31 @@ function playNote(note){
   }
   const freq = NOTE_FREQS[note];
   if (!freq) return;
-  const osc = audioCtx.createOscillator();
+
+  const now = audioCtx.currentTime;
   const gain = audioCtx.createGain();
-  osc.type = 'sine';
-  osc.frequency.value = freq;
-  gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
-  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
-  osc.connect(gain);
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.35, now + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 1.2);
   gain.connect(audioCtx.destination);
-  osc.start();
-  osc.stop(audioCtx.currentTime + 0.5);
+
+  const harmonics = [
+    {mult: 1, vol: 1.0},
+    {mult: 2, vol: 0.35},
+    {mult: 3, vol: 0.15},
+    {mult: 4, vol: 0.08}
+  ];
+  harmonics.forEach(h => {
+    const osc = audioCtx.createOscillator();
+    const hGain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = freq * h.mult;
+    hGain.gain.value = h.vol;
+    osc.connect(hGain);
+    hGain.connect(gain);
+    osc.start(now);
+    osc.stop(now + 1.2);
+  });
 }
 
 function toggleCamera(){
@@ -169,7 +218,7 @@ function startCamera(){
   }).then(stream => {
     currentStream = stream;
     video().srcObject = stream;
-    document.getElementById('playInstructions').innerText = 'Place your drawn piano flat in view of the camera, then tap calibrate.';
+    document.getElementById('playInstructions').innerText = 'Place your drawn piano flat in view of the camera, then tap Calibrate or Adjust Keys.';
     setupHandTracking();
   }).catch(err => {
     document.getElementById('playInstructions').innerText = 'Camera error: ' + err.message;
@@ -184,8 +233,8 @@ function setupHandTracking(){
   handsDetector.setOptions({
     maxNumHands: 2,
     modelComplexity: 1,
-    minDetectionConfidence: 0.6,
-    minTrackingConfidence: 0.6
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5
   });
   handsDetector.onResults(onHandResults);
 
@@ -193,25 +242,26 @@ function setupHandTracking(){
     onFrame: async () => {
       await handsDetector.send({image: video()});
     },
-    width: 640,
-    height: 480
+    width: 1280,
+    height: 960
   });
   cameraFeed.start();
 }
 
+// ---- Even-spacing calibration (quick default) ----
 function calibrate(){
   const v = video();
   const canvas = overlay();
   canvas.width = v.videoWidth;
   canvas.height = v.videoHeight;
 
-  const marginX = canvas.width * 0.05;
-  const keyboardTop = canvas.height * 0.55;
-  const keyboardBottom = canvas.height * 0.9;
+  const marginX = canvas.width * 0.02;
+  const keyboardTop = canvas.height * 0.35;
+  const keyboardBottom = canvas.height * 0.98;
   const usableWidth = canvas.width - marginX * 2;
-  const keyWidth = usableWidth / KEY_NAMES.length;
+  const keyWidth = usableWidth / WHITE_KEYS.length;
 
-  keyRegions = KEY_NAMES.map((note, i) => ({
+  whiteKeyRegions = WHITE_KEYS.map((note, i) => ({
     note,
     x1: marginX + i * keyWidth,
     x2: marginX + (i + 1) * keyWidth,
@@ -219,9 +269,104 @@ function calibrate(){
     y2: keyboardBottom
   }));
 
+  const blackKeyWidth = keyWidth * 0.55;
+  const blackKeyBottom = keyboardTop + (keyboardBottom - keyboardTop) * 0.55;
+  blackKeyRegions = [];
+  WHITE_KEYS.forEach((note, i) => {
+    const sharp = BLACK_KEYS_AFTER[note];
+    if (sharp) {
+      const centerX = marginX + (i + 1) * keyWidth;
+      blackKeyRegions.push({
+        note: sharp,
+        x1: centerX - blackKeyWidth / 2,
+        x2: centerX + blackKeyWidth / 2,
+        y1: keyboardTop,
+        y2: blackKeyBottom
+      });
+    }
+  });
+
   calibrated = true;
   document.getElementById('playInstructions').innerText = 'Calibrated! Tap the keys on your paper piano to play.';
 }
+
+// ---- Manual tap-to-adjust: user taps left+right edge of each white key, then each black key ----
+function buildAdjustSequence(){
+  const seq = [];
+  WHITE_KEYS.forEach(note => seq.push({note, type:'white'}));
+  BLACK_KEY_NOTES.forEach(note => seq.push({note, type:'black'}));
+  return seq;
+}
+let adjustSequence = buildAdjustSequence();
+
+function toggleAdjustMode(){
+  adjustMode = !adjustMode;
+  const btn = document.getElementById('adjustBtn');
+  if (adjustMode) {
+    btn.classList.add('active-mode');
+    btn.innerText = 'Cancel Adjust';
+    adjustStep = 0;
+    adjustTaps = [];
+    adjustedWhite = [];
+    adjustedBlack = [];
+    const v = video();
+    overlay().width = v.videoWidth;
+    overlay().height = v.videoHeight;
+    promptAdjustStep();
+  } else {
+    btn.classList.remove('active-mode');
+    btn.innerText = 'Adjust Keys';
+    document.getElementById('playInstructions').innerText = 'Place your drawn piano flat in view of the camera, then tap Calibrate or Adjust Keys.';
+  }
+}
+
+function promptAdjustStep(){
+  if (adjustStep >= adjustSequence.length) {
+    whiteKeyRegions = adjustedWhite;
+    blackKeyRegions = adjustedBlack;
+    calibrated = true;
+    adjustMode = false;
+    const btn = document.getElementById('adjustBtn');
+    btn.classList.remove('active-mode');
+    btn.innerText = 'Adjust Keys';
+    document.getElementById('playInstructions').innerText = 'Keys matched to your drawing! Tap to play.';
+    return;
+  }
+  const cur = adjustSequence[adjustStep];
+  const label = cur.note.replace('#', ' sharp ');
+  document.getElementById('playInstructions').innerText =
+    `Tap the LEFT edge, then the RIGHT edge, of the ${label} key (${adjustStep+1}/${adjustSequence.length}).`;
+}
+
+function handleAdjustTap(x, y){
+  adjustTaps.push({x, y});
+  if (adjustTaps.length === 2) {
+    const cur = adjustSequence[adjustStep];
+    const x1 = Math.min(adjustTaps[0].x, adjustTaps[1].x);
+    const x2 = Math.max(adjustTaps[0].x, adjustTaps[1].x);
+    const yTop = Math.min(adjustTaps[0].y, adjustTaps[1].y);
+    const canvas = overlay();
+    if (cur.type === 'white') {
+      adjustedWhite.push({ note: cur.note, x1, x2, y1: yTop, y2: canvas.height * 0.98 });
+    } else {
+      adjustedBlack.push({ note: cur.note, x1, x2, y1: canvas.height * 0.35, y2: yTop + (canvas.height*0.98-yTop)*0.55 });
+    }
+    adjustTaps = [];
+    adjustStep++;
+    promptAdjustStep();
+  }
+}
+
+overlay().addEventListener('click', (e) => {
+  if (!adjustMode) return;
+  const canvas = overlay();
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const x = (e.clientX - rect.left) * scaleX;
+  const y = (e.clientY - rect.top) * scaleY;
+  handleAdjustTap(x, y);
+});
 
 function onHandResults(results){
   const canvas = overlay();
@@ -235,40 +380,51 @@ function onHandResults(results){
   if (calibrated) {
     ctx.strokeStyle = 'rgba(37,99,235,0.6)';
     ctx.lineWidth = 2;
-    keyRegions.forEach(k => {
-      ctx.strokeRect(k.x1, k.y1, k.x2 - k.x1, k.y2 - k.y1);
-    });
+    whiteKeyRegions.forEach(k => ctx.strokeRect(k.x1, k.y1, k.x2 - k.x1, k.y2 - k.y1));
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    blackKeyRegions.forEach(k => ctx.fillRect(k.x1, k.y1, k.x2 - k.x1, k.y2 - k.y1));
   }
 
   const pressedThisFrame = {};
 
-  if (results.multiHandLandmarks) {
-    for (const landmarks of results.multiHandLandmarks) {
-      const tip = landmarks[8]; // index fingertip
-      const x = tip.x * canvas.width;
-      const y = tip.y * canvas.height;
+  if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0 && !adjustMode) {
+    const landmarks = results.multiHandLandmarks[0];
+    const tip = landmarks[8];
+    const rawX = tip.x * canvas.width;
+    const rawY = tip.y * canvas.height;
 
-      ctx.beginPath();
-      ctx.arc(x, y, 10, 0, 2 * Math.PI);
-      ctx.fillStyle = 'rgba(37,99,235,0.8)';
-      ctx.fill();
+    if (smoothX === null) {
+      smoothX = rawX; smoothY = rawY;
+    } else {
+      smoothX += (rawX - smoothX) * SMOOTHING;
+      smoothY += (rawY - smoothY) * SMOOTHING;
+    }
 
-      if (calibrated) {
-        const hitKey = keyRegions.find(k => x >= k.x1 && x <= k.x2 && y >= k.y1 && y <= k.y2);
-        if (hitKey) {
-          pressedThisFrame[hitKey.note] = true;
-          if (!lastPlayedKey[hitKey.note]) {
-            playNote(hitKey.note);
-          }
+    ctx.beginPath();
+    ctx.arc(smoothX, smoothY, 12, 0, 2 * Math.PI);
+    ctx.fillStyle = 'rgba(37,99,235,0.9)';
+    ctx.fill();
+
+    if (calibrated) {
+      let hitKey = blackKeyRegions.find(k => smoothX >= k.x1 && smoothX <= k.x2 && smoothY >= k.y1 && smoothY <= k.y2);
+      if (!hitKey) {
+        hitKey = whiteKeyRegions.find(k => smoothX >= k.x1 && smoothX <= k.x2 && smoothY >= k.y1 && smoothY <= k.y2);
+      }
+      if (hitKey) {
+        pressedThisFrame[hitKey.note] = true;
+        if (!lastPlayedKey[hitKey.note]) {
+          playNote(hitKey.note);
         }
       }
     }
+  } else if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+    smoothX = null; smoothY = null;
   }
 
   lastPlayedKey = pressedThisFrame;
 }
 
-function startPlay(songId){
+function startPlay(){
   showScreen('play');
   startCamera();
 }
@@ -284,6 +440,7 @@ function stopCameraAndGoHome(){
   }
   handsDetector = null;
   calibrated = false;
+  pendingSong = null;
   showScreen('home');
 }
 </script>
