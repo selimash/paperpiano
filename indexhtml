@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Paper Piano - Draw It, Play It</title>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; font-family: 'Segoe UI', Arial, sans-serif; }
+  body { background:#ffffff; color:#1a1a1a; min-height:100vh; }
+  .screen { display:none; min-height:100vh; width:100%; }
+  .screen.active { display:flex; flex-direction:column; align-items:center; justify-content:center; padding:20px; }
+
+  /* Landing */
+  #landing h1 { font-size:2.2rem; text-align:center; max-width:600px; font-weight:700; color:#111; }
+  #landing p.tagline { font-size:1.2rem; color:#555; margin-top:12px; text-align:center; }
+  .cta-btn { margin-top:30px; background:#2563eb; color:white; border:none; padding:16px 40px;
+             border-radius:30px; font-size:1.1rem; font-weight:600; cursor:pointer; box-shadow:0 4px 14px rgba(37,99,235,0.3); }
+  .cta-btn:hover { background:#1d4ed8; }
+
+  /* Home */
+  #home { width:100%; max-width:900px; }
+  .streak-widget { display:flex; gap:16px; justify-content:center; margin-bottom:30px; flex-wrap:wrap; }
+  .widget-card { background:#f5f7fa; border-radius:16px; padding:18px 26px; text-align:center; min-width:120px; box-shadow:0 2px 8px rgba(0,0,0,0.06); }
+  .widget-card .num { font-size:1.8rem; font-weight:700; color:#2563eb; }
+  .widget-card .label { font-size:0.85rem; color:#666; margin-top:4px; }
+  .mode-buttons { display:flex; gap:20px; justify-content:center; flex-wrap:wrap; margin-top:20px; }
+  .mode-btn { background:white; border:2px solid #2563eb; color:#2563eb; padding:20px 36px; border-radius:16px;
+              font-size:1.1rem; font-weight:600; cursor:pointer; min-width:220px; }
+  .mode-btn.primary { background:#2563eb; color:white; }
+
+  /* Camera / Play screen */
+  #play { width:100%; max-width:800px; }
+  video, canvas { width:100%; max-width:640px; border-radius:12px; }
+  #cam-wrap { position:relative; margin:0 auto; width:100%; max-width:640px; }
+  #overlay { position:absolute; top:0; left:0; }
+  .instructions { text-align:center; color:#555; margin-bottom:16px; max-width:600px; }
+  .back-btn { position:fixed; top:16px; left:16px; background:#eee; border:none; padding:10px 18px; border-radius:20px; cursor:pointer; }
+
+  /* Learning */
+  .song-list { display:flex; flex-direction:column; gap:10px; width:100%; max-width:500px; }
+  .song-item { background:#f5f7fa; padding:14px 20px; border-radius:12px; cursor:pointer; display:flex; justify-content:space-between; }
+  .song-item:hover { background:#eef2ff; }
+</style>
+</head>
+<body>
+
+<!-- LANDING SCREEN -->
+<div id="landing" class="screen active">
+  <h1>Draw a piano on paper. Let AI do the rest.</h1>
+  <p class="tagline">Turn any sketch of a keyboard into a real playable piano using your camera.</p>
+  <button class="cta-btn" onclick="showScreen('home')">Get Started</button>
+</div>
+
+<!-- HOME SCREEN -->
+<div id="home" class="screen">
+  <button class="back-btn" onclick="showScreen('landing')">&larr; Back</button>
+  <div class="streak-widget">
+    <div class="widget-card"><div class="num" id="streakDays">0</div><div class="label">Day Streak</div></div>
+    <div class="widget-card"><div class="num" id="songsLearned">0</div><div class="label">Songs Learned</div></div>
+    <div class="widget-card"><div class="num" id="minutesPlayed">0</div><div class="label">Minutes Played</div></div>
+  </div>
+  <div class="mode-buttons">
+    <button class="mode-btn primary" onclick="startMode('learn')">Learning Mode</button>
+    <button class="mode-btn" onclick="startMode('free')">Start Playing</button>
+  </div>
+</div>
+
+<!-- LEARNING SONG LIST -->
+<div id="learnList" class="screen">
+  <button class="back-btn" onclick="showScreen('home')">&larr; Back</button>
+  <h2 style="margin-bottom:20px;">Choose a song</h2>
+  <div class="song-list" id="songListContainer"></div>
+</div>
+
+<!-- CAMERA / PLAY SCREEN -->
+<div id="play" class="screen">
+  <button class="back-btn" onclick="stopCameraAndGoHome()">&larr; Back</button>
+  <p class="instructions" id="playInstructions">Place your drawn piano flat in view of the camera, then tap calibrate.</p>
+  <div id="cam-wrap">
+    <video id="video" autoplay playsinline muted style="display:none;"></video>
+    <canvas id="overlay"></canvas>
+  </div>
+  <div style="margin-top:16px; display:flex; gap:12px;">
+    <button class="cta-btn" id="calibrateBtn" onclick="startCalibration()">Calibrate Keys</button>
+  </div>
+  <p id="songPrompt" style="margin-top:16px; font-weight:600; color:#2563eb;"></p>
+</div>
+
+<script>
+/* ---------- Screen navigation ---------- */
+function showScreen(id){
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+
+/* ---------- Streak / stats (stored locally on this device) ---------- */
+function loadStats(){
+  const stats = JSON.parse(localStorage.getItem('pianoStats')||'{"streak":0,"songs":0,"minutes":0,"lastPlayed":null}');
+  document.getElementById('streakDays').innerText = stats.streak;
+  document.getElementById('songsLearned').innerText = stats.songs;
+  document.getElementById('minutesPlayed').innerText = stats.minutes;
+  return stats;
+}
+function bumpStreak(){
+  const stats = loadStats();
+  const today = new Date().toDateString();
+  if(stats.lastPlayed !== today){
+    stats.streak += 1;
+    stats.lastPlayed = today;
+    localStorage.setItem('pianoStats', JSON.stringify(stats));
+    loadStats();
+  }
+}
+loadStats();
+
+/* ---------- Song library ---------- */
+const SONGS = {
+  "runaway": {
+    name: "Runaway - Kanye West (Intro)",
+    notes: ["C5","C5","C5","C5","C5","C5","C5","G4"]
+  },
+  "twinkle": {
+    name: "Twinkle Twinkle Little Star",
+    notes: ["C4","C4","G4","G4","A4","A4","G4","F4","F4","E4","E4","D4","D4","C4"]
+  },
+  "ode_to_joy": {
+    name: "Ode to Joy (opening)",
+    notes: ["E4","E4","F4","G4","G4","F4","E4","D4","C4","C4","D4","E4","E4","D4","D4"]
+  }
+};
+
+function populateSongList(){
+  const container = document.getElementById('songListContainer');
+  container.innerHTML = '';
+  Object.keys(SONGS).forEach(key=>{
+    const div = document.createElement('div');
+    div.className = 'song-item';
+    div.innerHTML = `<span>${SONGS[key].name}</span><span>&rarr;</span>`;
+    div.onclick = ()=> startSong(key);
+    container.appendChild(div);
+  });
+}
+
+let currentSong = null;
+function startSong(key){
+  currentSong = key;
+  showScreen('play');
+  document.getElementById('songPrompt').innerText = "Learning: " + SONGS[key].name;
+  initCamera();
+}
+
+function startMode(mode){
+  if(mode === 'learn'){
+    populateSongList();
+    showScreen('learnList');
+  } else {
+    currentSong = null;
+    document.getElementById('songPrompt').innerText = '';
+    showScreen('play');
+    initCamera();
+  }
+}
+
+/* ---------- Audio: simple piano tone generator ---------- */
+const NOTE_FREQ = {
+  C4:261.63, D4:293.66, E4:329.63, F4:349.23, G4:392.00, A4:440.00, B4:493.88,
+  C5:523.25, D5:587.33, E5:659.25, F5:698.46, G5:783.99
+};
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+function playNote(note){
+  const freq = NOTE_FREQ[note];
+  if(!freq) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'triangle';
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.6);
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + 0.6);
+}
+
+/* ---------- Camera + MediaPipe Hand Tracking ---------- */
+let camera = null;
+let calibrating = false;
+let keyZones = [];
+const video = document.getElementById('video');
+const canvas = document.getElementById('overlay');
+const ctx = canvas.getContext('2d');
+
+function initCamera(){
+  canvas.width = 640; canvas.height = 480;
+  const hands = new Hands({locateFile:(file)=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+  hands.setOptions({ maxNumHands:1, modelComplexity:1, minDetectionConfidence:0.7, minTrackingConfidence:0.7 });
+  hands.onResults(onHandResults);
+
+  camera = new Camera(video, {
+    onFrame: async ()=>{ await hands.send({image:video}); },
+    width:640, height:480
+  });
+  camera.start();
+}
+
+function stopCameraAndGoHome(){
+  if(camera){ camera.stop(); }
+  showScreen('home');
+}
+
+const CALIBRATION_NOTES = ["C4","D4","E4","F4","G4","A4","B4","C5"];
+let calibIndex = 0;
+function startCalibration(){
+  calibrating = true;
+  calibIndex = 0;
+  keyZones = [];
+  document.getElementById('playInstructions').innerText =
+    `Tap where "${CALIBRATION_NOTES[calibIndex]}" is drawn on your paper piano.`;
+}
+
+let lastTapTime = 0;
+function onHandResults(results){
+  ctx.save();
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.drawImage(results.image,0,0,canvas.width,canvas.height);
+
+  if(results.multiHandLandmarks && results.multiHandLandmarks.length>0){
+    const lm = results.multiHandLandmarks[0];
+    const tip = lm[8];
+    const x = tip.x * canvas.width;
+    const y = tip.y * canvas.height;
+
+    ctx.beginPath();
+    ctx.arc(x,y,10,0,2*Math.PI);
+    ctx.fillStyle = '#2563eb';
+    ctx.fill();
+
+    const now = Date.now();
+    if(now - lastTapTime > 500){
+      if(calibrating){
+        if(now - lastTapTime > 800){
+          keyZones.push({note:CALIBRATION_NOTES[calibIndex], x:tip.x, y:tip.y});
+          calibIndex++;
+          lastTapTime = now;
+          if(calibIndex >= CALIBRATION_NOTES.length){
+            calibrating = false;
+            document.getElementById('playInstructions').innerText = "Calibrated! Start tapping your paper piano to play.";
+          } else {
+            document.getElementById('playInstructions').innerText =
+              `Tap where "${CALIBRATION_NOTES[calibIndex]}" is drawn on your paper piano.`;
+          }
+        }
+      } else if(keyZones.length>0){
+        let nearest = null, minDist = Infinity;
+        keyZones.forEach(z=>{
+          const d = Math.hypot(z.x-tip.x, z.y-tip.y);
+          if(d<minDist){ minDist=d; nearest=z; }
+        });
+        if(nearest && minDist < 0.08){
+          playNote(nearest.note);
+          bumpStreak();
+          lastTapTime = now;
+        }
+      }
+    }
+  }
+  ctx.restore();
+}
+</script>
+</body>
+</html>
